@@ -8,6 +8,16 @@
 #include "log.h"
 #include "zip/shadow_zip.h"
 #include "xhook/xhook.h"
+#include "io_github_noodle1983_Boostrap.h"
+
+struct GlobalData
+{	
+	std::map<int, FILE*> g_fd_to_file;	
+	std::map<FILE*, ShadowZip*> g_file_to_shadowzip;
+	PthreadRwMutex g_file_to_shadowzip_mutex;
+};
+#define g_global_data (LeakSingleton<GlobalData, 0>::instance())
+
 
 static inline char * dupstr(const char* const str)
 {
@@ -20,13 +30,24 @@ static inline char * dupstr(const char* const str)
 	return ret;
 }
 
-struct GlobalData
-{	
-	std::map<int, FILE*> g_fd_to_file;	
-	std::map<FILE*, ShadowZip*> g_file_to_shadowzip;
-	PthreadRwMutex g_file_to_shadowzip_mutex;
-};
-#define g_global_data (LeakSingleton<GlobalData, 0>::instance())
+const char* SPLITER = ";";
+const char* g_data_file_path = NULL;
+const char* g_apk_file_path = NULL;
+static void bootstrap();
+std::string get_apk_path(const std::string& bundle_id);
+
+__attribute__ ((visibility ("default")))
+JNIEXPORT void JNICALL Java_io_github_noodle1983_Boostrap_init
+  (JNIEnv * jenv, jclass cls, jstring path)
+{
+	const char* data_file_path = jenv->GetStringUTFChars(path, NULL); 
+	g_data_file_path = dupstr(data_file_path); // never delete, ok with only one
+	jenv->ReleaseStringUTFChars(path, data_file_path);
+	MY_INFO("data file path:%s", g_data_file_path);
+	
+	LeakSingleton<GlobalData, 0>::init();
+    bootstrap();
+}
 
 static std::string get_bundle_id()
 {
@@ -56,7 +77,7 @@ char* get_arch_abi()
 
 static char* g_use_data_path = NULL;
 __attribute__ ((visibility ("default")))
-char* use_data_dir(const char* data_path)
+char* use_data_dir(const char* data_path, const char* apk_path)
 {
 	if (strlen(data_path) > 0){
 		DIR* dir = opendir(data_path);
@@ -70,7 +91,7 @@ char* use_data_dir(const char* data_path)
 	
 	std::string bundle_id = get_bundle_id();
 	char patch_info_path[256] = {0};
-	snprintf(patch_info_path, sizeof(patch_info_path), "/data/data/%s/files/user.db",  bundle_id.c_str());
+	snprintf(patch_info_path, sizeof(patch_info_path), "%s/user.db",  g_data_file_path);
 	
 	std::fstream patch_info_file(patch_info_path, std::fstream::out|std::fstream::trunc);
 	if (!patch_info_file.is_open())
@@ -80,7 +101,9 @@ char* use_data_dir(const char* data_path)
 		MY_ERROR("can't access to %s. %s", patch_info_path, error_str);
 		return dupstr(error_str);
 	}
-	patch_info_file.write(data_path, strlen(data_path));
+	patch_info_file.write(data_path, strlen(data_path));	
+	patch_info_file.write(SPLITER, strlen(SPLITER));	
+	patch_info_file.write(apk_path, strlen(apk_path));	
 	patch_info_file.close();
 	return NULL;
 }
@@ -88,7 +111,7 @@ char* use_data_dir(const char* data_path)
 static bool pre_process_so_lib(const char* const so_path, const char* const so_name, const std::string& bundle_id)
 {
 	char link_file[256] = {0};
-	snprintf(link_file, sizeof(link_file), "/data/data/%s/files/%s", bundle_id.c_str(), so_name);
+	snprintf(link_file, sizeof(link_file), "%s/%s", g_data_file_path, so_name);
 	
 	MY_LOG("link %s to %s", so_path, link_file);
 	
@@ -186,25 +209,17 @@ static bool pre_process_all_so_lib(const char* const data_path, const std::strin
 
 static dev_t g_apk_device_id = -1;
 static ino_t g_apk_ino = -1;
-static bool extract_patch_info(const std::string& apk_path, const std::string& bundle_id, std::string& default_path, std::string& patch_path)
+static bool extract_patch_info(const std::string& bundle_id, std::string& default_path, std::string& patch_path)
 {
 	char default_il2cpp_path[256] = {0};
-	snprintf(default_il2cpp_path, sizeof(default_il2cpp_path), "/data/data/%s/lib/libil2cpp.so",  bundle_id.c_str());
+	snprintf(default_il2cpp_path, sizeof(default_il2cpp_path), "%s/../lib/libil2cpp.so",  g_data_file_path);
 	default_path = std::string(default_il2cpp_path);
 	patch_path.clear();
 	
 	char patch_info_path[256] = {0};
-	snprintf(patch_info_path, sizeof(patch_info_path), "/data/data/%s/files/user.db",  bundle_id.c_str());
+	snprintf(patch_info_path, sizeof(patch_info_path), "%s/user.db",  g_data_file_path);
 	
-	struct stat apk_stat;
-	memset(&apk_stat, 0, sizeof(struct stat));
-	if (stat(apk_path.c_str(), &apk_stat) != 0) {
-		MY_ERROR("can't read file:%d[%s]", errno, apk_path.c_str());
-		return false;
-	}
-	g_apk_device_id = apk_stat.st_dev;
-	g_apk_ino = apk_stat.st_ino;
-	
+	//get patch date
 	struct stat user_stat;
 	memset(&user_stat, 0, sizeof(struct stat));
 	if (stat(patch_info_path, &user_stat) != 0) {
@@ -212,19 +227,13 @@ static bool extract_patch_info(const std::string& apk_path, const std::string& b
 		return false;
 	}
 	
-	if (apk_stat.st_mtime > user_stat.st_mtime){	
-		MY_ERROR("newer apk file:%s, no need to patch", apk_path.c_str());
-		unlink(patch_info_path);
-		return false;
-	}
-	
+	//get patch config
 	std::fstream patch_info_file(patch_info_path, std::fstream::in);
 	if (!patch_info_file.is_open())
 	{	
 		if (g_use_data_path != NULL){delete[] g_use_data_path; g_use_data_path = NULL;}
 		return false;
-	}
-	
+	}	
 	char file_content[4096] = {0};
 	patch_info_file.getline(file_content, sizeof(file_content));
 	if (strlen(file_content) == 0)
@@ -233,6 +242,14 @@ static bool extract_patch_info(const std::string& apk_path, const std::string& b
 		return false;
 	}
 	patch_info_file.close();
+	
+	//split data_path
+	char* split_pos = strstr( file_content, SPLITER );
+	if(split_pos != NULL)
+	{
+		int spliter_len = strlen(SPLITER);
+		memset(split_pos, 0, spliter_len);
+	}
 	
 	char* data_path = file_content;
 	DIR* dir = opendir(data_path);
@@ -243,6 +260,25 @@ static bool extract_patch_info(const std::string& apk_path, const std::string& b
 	}
 	closedir(dir);
 	
+	//get and save apk file id
+	std::string apk_path_string = get_apk_path(bundle_id);	
+	const char* apk_path = apk_path_string.c_str();
+	struct stat apk_stat;
+	memset(&apk_stat, 0, sizeof(struct stat));
+	if (stat(apk_path, &apk_stat) != 0) {
+		MY_ERROR("can't read file:%d[%s]", errno, apk_path);
+		return false;
+	}
+	g_apk_device_id = apk_stat.st_dev;
+	g_apk_ino = apk_stat.st_ino;
+		
+	//if we have newer apk file, then no need to load patch
+	if (apk_stat.st_mtime > user_stat.st_mtime){	
+		MY_ERROR("newer apk file:%s, no need to patch", apk_path);
+		unlink(patch_info_path);
+		return false;
+	}
+	
 	if (!pre_process_all_so_lib(data_path, bundle_id))
 	{
 		MY_ERROR("can't pre_process_all_so_lib");
@@ -250,7 +286,7 @@ static bool extract_patch_info(const std::string& apk_path, const std::string& b
 	}
 	
 	char link_file[256] = {0};
-	snprintf(link_file, sizeof(link_file), "/data/data/%s/files/libil2cpp.so", bundle_id.c_str());
+	snprintf(link_file, sizeof(link_file), "%s/libil2cpp.so", g_data_file_path);
 	std::string il2cpp_path(link_file);	
 	FILE *fp = fopen (il2cpp_path.c_str(), "r");
 	if (fp == NULL) 
@@ -262,6 +298,8 @@ static bool extract_patch_info(const std::string& apk_path, const std::string& b
 	
 	if (g_use_data_path != NULL){delete[] g_use_data_path;}
 	g_use_data_path = dupstr(data_path);
+	if (g_apk_file_path != NULL){delete[] g_apk_file_path;}
+	g_apk_file_path = dupstr(apk_path);
 	patch_path = il2cpp_path;
 	return true;
 }
@@ -458,8 +496,11 @@ std::string get_apk_path(const std::string& bundle_id)
 			while(line[line_len - 1] == ' ' || line[line_len - 1] == '\r' || line[line_len - 1] == '\n' || line[line_len - 1] == '\t') {line[line_len - 1] = '\0'; line_len--;}
 			if ( strstr( line, bundle_id.c_str()) && (memcmp(line + strlen(line) - TAIL_LEN, TAIL, TAIL_LEN) == 0) ){
 				found_path = strchr( line, '/' );
-				ret = std::string(found_path);
-				break;
+				if (ShadowZip::contains_path(found_path, "assets/bin/Data/"))
+				{
+					ret = std::string(found_path);
+					break;
+				}
 			}
 		}
 		fclose( fp ) ;
@@ -501,7 +542,7 @@ static int my_stat(const char *path, struct stat *file_stat)
 
 static ShadowZip* get_cached_shadowzip(FILE *stream)
 {
-	PthreadReadGuard(&g_global_data->g_file_to_shadowzip_mutex);
+	PthreadReadGuard(g_global_data->g_file_to_shadowzip_mutex);
 	std::map<FILE*, ShadowZip*>::iterator it = g_global_data->g_file_to_shadowzip.find(stream);
 	ShadowZip* shadow_zip = (it == g_global_data->g_file_to_shadowzip.end()) ? NULL : it->second;
 	return shadow_zip;
@@ -509,7 +550,7 @@ static ShadowZip* get_cached_shadowzip(FILE *stream)
 
 static ShadowZip* get_cached_shadowzip(int fd)
 {
-	PthreadReadGuard(&g_global_data->g_file_to_shadowzip_mutex);
+	PthreadReadGuard(g_global_data->g_file_to_shadowzip_mutex);
 	std::map<int, FILE*>::iterator it_fd = g_global_data->g_fd_to_file.find(fd);
 	FILE* stream = (it_fd == g_global_data->g_fd_to_file.end()) ? NULL : it_fd->second;
 	if (stream == NULL){return NULL;}
@@ -550,7 +591,7 @@ static FILE *my_fopen(const char *path, const char *mode)
 		}	
 		
 		MY_LOG("shadow apk: %s", path);
-		PthreadWriteGuard(&g_global_data->g_file_to_shadowzip_mutex);
+		PthreadWriteGuard(g_global_data->g_file_to_shadowzip_mutex);
 		g_global_data->g_file_to_shadowzip[fp] = shadow_zip;
 		return fp;
 	}
@@ -644,7 +685,7 @@ static int my_fclose(FILE* stream)
 	
 	ShadowZip* shadow_zip = NULL;
 	{
-		PthreadWriteGuard(&g_global_data->g_file_to_shadowzip_mutex);
+		PthreadWriteGuard(g_global_data->g_file_to_shadowzip_mutex);
 		std::map<FILE*, ShadowZip*>::iterator it = g_global_data->g_file_to_shadowzip.find(stream);
 		shadow_zip = (it == g_global_data->g_file_to_shadowzip.end()) ? NULL : it->second;
 		if (it != g_global_data->g_file_to_shadowzip.end()){
@@ -673,7 +714,7 @@ static void *my_dlopen(const char *filename, int flags)
 	{		
 		std::string bundle_id = get_bundle_id();	
 		char link_file[256] = {0};
-		snprintf(link_file, sizeof(link_file), "/data/data/%s/files/libil2cpp.so", bundle_id.c_str());
+		snprintf(link_file, sizeof(link_file), "%s/libil2cpp.so", g_data_file_path);
 		//snprintf(link_file, sizeof(link_file), "/storage/emulated/0/Android/data/%s/files/libil2cpp.so", bundle_id.c_str());
 		MY_LOG("redirect to %s", link_file);
 		return old_dlopen(link_file, flags);
@@ -685,7 +726,6 @@ typedef int (*OpenType)(const char *path, int flags, ...);
 static OpenType old_open = NULL;
 static int my_open(const char *path, int flags, ...)
 {	
-	MY_METHOD("open: %s", path);
 	if (old_open == NULL)
 	{
 		MY_ERROR("open is NULL");
@@ -694,7 +734,7 @@ static int my_open(const char *path, int flags, ...)
 		
 	check_set_old_function_to_shadow_zip();
 	
-	mode_t mode = 0;
+	mode_t mode = -1;
 	int has_mode = ((flags & O_CREAT) == O_CREAT) || ((flags & 020000000) == 020000000);
 	if (has_mode)
 	{
@@ -707,7 +747,9 @@ static int my_open(const char *path, int flags, ...)
 	struct stat file_stat;
 	memset(&file_stat, 0, sizeof(struct stat));
 	if (old_stat(path, &file_stat) != 0) {
-		return has_mode ? old_open(path, flags, mode) : old_open(path, flags);
+		int ret = has_mode ? old_open(path, flags, mode) : old_open(path, flags);
+		MY_METHOD("open: %s -> fd:0x%08x", path, ret);
+		return ret;
 	}
 	
 	if (g_apk_device_id == file_stat.st_dev && g_apk_ino == file_stat.st_ino)
@@ -717,25 +759,29 @@ static int my_open(const char *path, int flags, ...)
 		if (fp == NULL){	
 			MY_ERROR("something bad happens!");
 			delete shadow_zip;
-			return has_mode ? old_open(path, flags, mode) : old_open(path, flags); 
+			int ret = has_mode ? old_open(path, flags, mode) : old_open(path, flags);
+			MY_METHOD("open: %s -> fd:0x%08x", path, ret);
+			return ret;
 		}	
 		int fd = fileno(fp);
 		
-		MY_LOG("shadow apk: %s, fd:0x%08zx,", path, fd);
-		PthreadWriteGuard(&g_global_data->g_file_to_shadowzip_mutex);
+		MY_LOG("shadow apk: %s, fd:0x%08x,", path, fd);
+		PthreadWriteGuard(g_global_data->g_file_to_shadowzip_mutex);
 		g_global_data->g_fd_to_file[fd] = fp;
 		g_global_data->g_file_to_shadowzip[fp] = shadow_zip;
 		return fd;
 	}
 	
-	return has_mode ? old_open(path, flags, mode) : old_open(path, flags);
+	int ret = has_mode ? old_open(path, flags, mode) : old_open(path, flags);
+	MY_METHOD("open: %s -> fd:0x%08x", path, ret);
+	return ret;
 }
 
 typedef ssize_t(*ReadType)(int fd, void *buf, size_t nbyte);
 static ReadType old_read = NULL;
 static ssize_t my_read(int fd, void *buf, size_t nbyte)
 {
-	MY_METHOD("read: 0x%08zx, %d", fd, nbyte);
+	MY_METHOD("read: 0x%08x, %zu", fd, nbyte);
 	
 	check_set_old_function_to_shadow_zip();
 	
@@ -746,7 +792,7 @@ static ssize_t my_read(int fd, void *buf, size_t nbyte)
 	}else{
 		ret = shadow_zip->fread(buf, 1, nbyte, (FILE*)(size_t)fd);
 	}
-	MY_METHOD("readed: 0x%08zx, %d", fd, ret);
+	MY_METHOD("readed: 0x%08x, %zd", fd, ret);
 	return ret;
 }
 
@@ -766,7 +812,7 @@ off_t my_lseek(int fd, off_t offset, int whence)
 		ret = shadow_zip->fseek((FILE*)(size_t)fd, offset, whence);
 		if (ret == 0){ret = shadow_zip->ftell((FILE*)(size_t)fd);}
 	}
-	MY_METHOD("lseek: 0x%08zx, return: %ld", fd, ret);
+	MY_METHOD("lseek: 0x%08x, return: %ld", fd, ret);
 	return ret;
 }
 
@@ -774,7 +820,7 @@ typedef off64_t (*Lseek64Type)(int fd, off64_t offset, int whence);
 static Lseek64Type old_lseek64 = NULL;
 off64_t my_lseek64(int fd, off64_t offset, int whence)
 {
-	MY_METHOD("lseek64: 0x%08zx, offset: 0x%08llx, whence: %d", fd, offset, whence);
+	MY_METHOD("lseek64: 0x%08x, offset: 0x%08llx, whence: %d", fd, (unsigned long long)offset, whence);
 	
 	check_set_old_function_to_shadow_zip();
 	
@@ -786,7 +832,7 @@ off64_t my_lseek64(int fd, off64_t offset, int whence)
 		ret =  shadow_zip->fseek((FILE*)(size_t)fd, offset, whence);
 		if (ret == 0){ret = shadow_zip->ftell((FILE*)(size_t)fd);}
 	}
-	MY_METHOD("lseek64: 0x%08zx, return: %lld", fd, ret);
+	MY_METHOD("lseek64: 0x%08x, return: %lld", fd, (unsigned long long)ret);
 	return ret;
 }
 
@@ -794,13 +840,13 @@ typedef int (*CloseType)(int fd);
 static CloseType old_close = NULL;
 static int my_close(int fd)
 {
-	MY_METHOD("my_close: 0x%08zx", fd);
+	MY_METHOD("my_close: 0x%08x", fd);
 	
 	check_set_old_function_to_shadow_zip();
 	
 	ShadowZip* shadow_zip = NULL;
 	{
-		PthreadWriteGuard(&g_global_data->g_file_to_shadowzip_mutex);
+		PthreadWriteGuard(g_global_data->g_file_to_shadowzip_mutex);
 		std::map<int, FILE*>::iterator it_fd = g_global_data->g_fd_to_file.find(fd);
 		FILE* stream = (it_fd == g_global_data->g_fd_to_file.end()) ? NULL : it_fd->second;		
 		if (stream == NULL){return old_close(fd);}
@@ -927,7 +973,7 @@ static void *my_art_dlopen(const char *filename, int flags)
 	{		
 		std::string bundle_id = get_bundle_id();	
 		char link_file[256] = {0};
-		snprintf(link_file, sizeof(link_file), "/data/data/%s/files/libil2cpp.so", bundle_id.c_str());
+		snprintf(link_file, sizeof(link_file), "%s/libil2cpp.so", g_data_file_path);
 		MY_LOG("art redirect to %s", link_file);
 		return art_old_dlopen(link_file, flags);
 	}
@@ -990,15 +1036,18 @@ static void bootstrap()
 	// }
 	MY_INFO("bootstrap running %s with apk_path:%s", TARGET_ARCH_ABI, apk_path.c_str());	
 	
-	//std::string default_il2cpp_path;
-	bool use_patch = true; //extract_patch_info(apk_path, bundle_id, default_il2cpp_path, patch_il2cpp_path);
-	// if (!verify_bundle_id( bundle_id.c_str() )){		
-		// MY_ERROR("bootstrap running failed.");
-		// return;
-	// }
+	std::string default_il2cpp_path;
+	std::string patch_il2cpp_path;
+	//bool use_patch = extract_patch_info(bundle_id, default_il2cpp_path, patch_il2cpp_path);
+	bool use_patch = true;
+	if (!verify_bundle_id( bundle_id.c_str() )){		
+		MY_ERROR("bootstrap running failed.");
+		return;
+	}
 	
 	if (use_patch){
-		//bool success = (0 == ShadowZip::init(g_use_data_path, apk_path.c_str())) && (0 == init_hook(bundle_id)) && (0 == init_art_hook());
+		MY_INFO("bootstrap running %s with apk_path:%s", TARGET_ARCH_ABI, g_apk_file_path);	
+		//bool success = (0 == ShadowZip::init(g_use_data_path, g_apk_file_path)) && (0 == init_hook(bundle_id)) && (0 == init_art_hook());
 		bool success = (0 == init_hook(bundle_id));
 		if (success)
 		{
@@ -1027,12 +1076,10 @@ static void bootstrap()
 	}
 }
 
-static void entrance() __attribute__((constructor));
-void entrance() {
 	MY_LOG("bootstrap entrance");
-	LeakSingleton<GlobalData, 0>::init();
-    bootstrap();
-}
+//static void entrance() __attribute__((constructor));
+//void entrance() {
+//}
 
 
 
