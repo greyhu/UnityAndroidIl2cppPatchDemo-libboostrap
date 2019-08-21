@@ -1029,13 +1029,6 @@ static void bootstrap()
 		// MY_ERROR("bundle id not matched:" BUNDLE_ID);
 		// return;
 	// }
-	std::string apk_path = get_apk_path(bundle_id);
-	// if (!verify_bundle_id( bundle_id.c_str() )){		
-		// MY_ERROR("bundle id not matched:" BUNDLE_ID);
-		// return;
-	// }
-	MY_INFO("bootstrap running %s with apk_path:%s", TARGET_ARCH_ABI, apk_path.c_str());	
-	
 	std::string default_il2cpp_path;
 	std::string patch_il2cpp_path;
 	//bool use_patch = extract_patch_info(bundle_id, default_il2cpp_path, patch_il2cpp_path);
@@ -1062,7 +1055,8 @@ static void bootstrap()
 			}
 
 			//check_set_old_function_to_shadow_zip();
-			MY_INFO("bootstrap running with patch");//:%s", patch_il2cpp_path.c_str());
+			MY_INFO("bootstrap running with patch");
+			//MY_INFO("bootstrap running with patch:%s", patch_il2cpp_path.c_str());
 			//ShadowZip::output_apk(g_use_data_path);
 		}// else we still do so hook
 		else
@@ -1076,7 +1070,6 @@ static void bootstrap()
 	}
 }
 
-	MY_LOG("bootstrap entrance");
 //static void entrance() __attribute__((constructor));
 //void entrance() {
 //}
