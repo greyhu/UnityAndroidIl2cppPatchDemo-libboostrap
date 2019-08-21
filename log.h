@@ -31,26 +31,26 @@
 #define LOG_TAG "il2cpp"
 
 
-static inline bool verify_bundle_id(const char* _bundle_id)
-{
-	const char* const check_bundle_id = BUNDLE_ID;
-	for(int i = 0; i < 100; i++){
-		if (check_bundle_id[i] == '*')
-		{
-			return true;
-		}
-		else if(check_bundle_id[i] == '\0')
-		{
-			return _bundle_id[i] == '\0';
-		}
-		else if (_bundle_id[i] != check_bundle_id[i])
-		{
-			return false;
-		}
-		//else continue;
-	}
-	return false;
-}
+// static inline bool verify_bundle_id(const char* _bundle_id)
+// {
+	// const char* const check_bundle_id = BUNDLE_ID;
+	// for(int i = 0; i < 100; i++){
+		// if (check_bundle_id[i] == '*')
+		// {
+			// return true;
+		// }
+		// else if(check_bundle_id[i] == '\0')
+		// {
+			// return _bundle_id[i] == '\0';
+		// }
+		// else if (_bundle_id[i] != check_bundle_id[i])
+		// {
+			// return false;
+		// }
+		// //else continue;
+	// }
+	// return false;
+// }
 
 #endif
 
