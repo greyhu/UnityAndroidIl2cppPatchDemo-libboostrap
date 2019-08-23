@@ -709,13 +709,11 @@ static void *my_dlopen(const char *filename, int flags)
 	
 	int il2cpp_postfix_len = strlen("libil2cpp.so");
 	int len = strlen(filename);
-	//str_right(filename,il2cpp_postfix_len)=="libil2cpp.so"
 	if (len > il2cpp_postfix_len && memcmp(filename + len - il2cpp_postfix_len, "libil2cpp.so", il2cpp_postfix_len) == 0)
 	{		
 		std::string bundle_id = get_bundle_id();	
 		char link_file[256] = {0};
 		snprintf(link_file, sizeof(link_file), "%s/libil2cpp.so", g_data_file_path);
-		//snprintf(link_file, sizeof(link_file), "/storage/emulated/0/Android/data/%s/files/libil2cpp.so", bundle_id.c_str());
 		MY_LOG("redirect to %s", link_file);
 		return old_dlopen(link_file, flags);
 	}
@@ -941,19 +939,19 @@ static int init_hook(const std::string& bundle_id)
 
 	//xhook_enable_debug(1);
 
-	//HOOK("libunity.so", fopen);
-	//HOOK("libunity.so", fseek);
-	//HOOK("libunity.so", ftell);
-	//HOOK("libunity.so", fread);
-	//HOOK("libunity.so", fgets);
-	//HOOK("libunity.so", fclose);
-	//HOOK("libunity.so", stat);
+	HOOK("libunity.so", fopen);
+	HOOK("libunity.so", fseek);
+	HOOK("libunity.so", ftell);
+	HOOK("libunity.so", fread);
+	HOOK("libunity.so", fgets);
+	HOOK("libunity.so", fclose);
+	HOOK("libunity.so", stat);
 	HOOK("libunity.so", dlopen);
-	//HOOK("libunity.so", open);
-	//HOOK("libunity.so", read);
-	//HOOK("libunity.so", lseek);
-	//HOOK("libunity.so", lseek64);
-	//HOOK("libunity.so", close);
+	HOOK("libunity.so", open);
+	HOOK("libunity.so", read);
+	HOOK("libunity.so", lseek);
+	HOOK("libunity.so", lseek64);
+	HOOK("libunity.so", close);
 	
 	if(0 != xhook_refresh(1)){
 		MY_ERROR("failed to find replace function"); 
@@ -1025,14 +1023,14 @@ static void check_set_old_function_to_shadow_zip()
 static void bootstrap()
 {
 	std::string bundle_id = get_bundle_id();
-	// if (!verify_bundle_id( bundle_id.c_str() )){		
-		// MY_ERROR("bundle id not matched:" BUNDLE_ID);
-		// return;
-	// }
+	if (!verify_bundle_id( bundle_id.c_str() )){		
+		MY_ERROR("bundle id not matched:" BUNDLE_ID);
+		return;
+	}
+	
 	std::string default_il2cpp_path;
 	std::string patch_il2cpp_path;
-	//bool use_patch = extract_patch_info(bundle_id, default_il2cpp_path, patch_il2cpp_path);
-	bool use_patch = true;
+	bool use_patch = extract_patch_info(bundle_id, default_il2cpp_path, patch_il2cpp_path);
 	if (!verify_bundle_id( bundle_id.c_str() )){		
 		MY_ERROR("bootstrap running failed.");
 		return;
@@ -1040,27 +1038,23 @@ static void bootstrap()
 	
 	if (use_patch){
 		MY_INFO("bootstrap running %s with apk_path:%s", TARGET_ARCH_ABI, g_apk_file_path);	
-		//bool success = (0 == ShadowZip::init(g_use_data_path, g_apk_file_path)) && (0 == init_hook(bundle_id)) && (0 == init_art_hook());
-		bool success = (0 == init_hook(bundle_id));
+		bool success = (0 == ShadowZip::init(g_use_data_path, g_apk_file_path)) && (0 == init_hook(bundle_id)) && (0 == init_art_hook());
 		if (success)
-		{
-			char patch_info_path[256] = { 0 };
-			//snprintf(patch_info_path, sizeof(patch_info_path), "/storage/emulated/0/Android/data/%s/files/libil2cpp.so", bundle_id.c_str());
-			snprintf(patch_info_path, sizeof(patch_info_path), "/data/data/%s/files/libil2cpp.so", bundle_id.c_str()); 
-			static void *handle = dlopen(patch_info_path, RTLD_NOW);
+		{			
+			static void *handle = dlopen(patch_il2cpp_path.c_str(), RTLD_NOW);
 			if (!handle) {
 				MY_ERROR("failed to load libil2cpp:%s, must exit", dlerror());
 				_exit(-1);
 				return;
 			}
-
-			//check_set_old_function_to_shadow_zip();
-			MY_INFO("bootstrap running with patch");
-			//MY_INFO("bootstrap running with patch:%s", patch_il2cpp_path.c_str());
+			
+			check_set_old_function_to_shadow_zip();
+			
+			MY_INFO("bootstrap running with patch:%s", patch_il2cpp_path.c_str());
 			//ShadowZip::output_apk(g_use_data_path);
 		}// else we still do so hook
 		else
-		{
+		{		
 			MY_INFO("bootstrap running failed with patch");
 		}
 	}
