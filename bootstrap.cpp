@@ -33,17 +33,23 @@ static inline char * dupstr(const char* const str)
 const char* SPLITER = ";";
 const char* g_data_file_path = NULL;
 const char* g_apk_file_path = NULL;
+const char* g_obb_file_path = NULL;
 static void bootstrap();
 std::string get_apk_path(const std::string& bundle_id);
 
 __attribute__ ((visibility ("default")))
 JNIEXPORT void JNICALL Java_io_github_noodle1983_Boostrap_init
-  (JNIEnv * jenv, jclass cls, jstring path)
+  (JNIEnv * jenv, jclass cls, jstring path, jstring obbpath)
 {
 	const char* data_file_path = jenv->GetStringUTFChars(path, NULL); 
 	g_data_file_path = dupstr(data_file_path); // never delete, ok with only one
 	jenv->ReleaseStringUTFChars(path, data_file_path);
 	MY_INFO("data file path:%s", g_data_file_path);
+
+	const char* data_obbpath = jenv->GetStringUTFChars(obbpath, NULL);
+	g_obb_file_path = dupstr(data_obbpath); // never delete, ok with only one
+	jenv->ReleaseStringUTFChars(obbpath, data_obbpath);
+	MY_INFO("obb file path:%s", g_obb_file_path);
 	
 	LeakSingleton<GlobalData, 0>::init();
     bootstrap();
@@ -106,6 +112,16 @@ char* use_data_dir(const char* data_path, const char* apk_path)
 	patch_info_file.write(apk_path, strlen(apk_path));	
 	patch_info_file.close();
 	return NULL;
+}
+
+static bool IsObb(const char* path) {
+	int obb_ext_len = 4;//strlen(".obb");
+	int pathlen = strlen(path);
+	bool isobb = false;
+	if (pathlen > obb_ext_len && memcmp(path + pathlen - obb_ext_len, ".obb", obb_ext_len) == 0) {
+		isobb = true;
+	}
+	return isobb;
 }
 
 static bool pre_process_so_lib(const char* const so_path, const char* const so_name, const std::string& bundle_id)
@@ -211,14 +227,16 @@ static dev_t g_apk_device_id = -1;
 static ino_t g_apk_ino = -1;
 static bool extract_patch_info(const std::string& bundle_id, std::string& default_path, std::string& patch_path)
 {
-	char default_il2cpp_path[256] = {0};
+	char default_il2cpp_path[256] = {0};	//默认libil2cpp补丁路径
 	snprintf(default_il2cpp_path, sizeof(default_il2cpp_path), "%s/../lib/libil2cpp.so",  g_data_file_path);
-	default_path = std::string(default_il2cpp_path);
+	default_path = std::string(default_il2cpp_path);	//返回值
+
 	patch_path.clear();
 	
-	char patch_info_path[256] = {0};
+	char patch_info_path[256] = {0};	//列表文件路径
 	snprintf(patch_info_path, sizeof(patch_info_path), "%s/user.db",  g_data_file_path);
 	
+	MY_LOG("patch_info_path:%s", patch_info_path);
 	//get patch date
 	struct stat user_stat;
 	memset(&user_stat, 0, sizeof(struct stat));
@@ -231,6 +249,7 @@ static bool extract_patch_info(const std::string& bundle_id, std::string& defaul
 	std::fstream patch_info_file(patch_info_path, std::fstream::in);
 	if (!patch_info_file.is_open())
 	{	
+		MY_LOG("can't read file 2:%d[%s]", errno, patch_info_path);
 		if (g_use_data_path != NULL){delete[] g_use_data_path; g_use_data_path = NULL;}
 		return false;
 	}	
@@ -248,10 +267,10 @@ static bool extract_patch_info(const std::string& bundle_id, std::string& defaul
 	if(split_pos != NULL)
 	{
 		int spliter_len = strlen(SPLITER);
-		memset(split_pos, 0, spliter_len);
+		memset(split_pos, 0, spliter_len); //干掉分号之后的内容
 	}
 	
-	char* data_path = file_content;
+	char* data_path = file_content;	//补丁路径
 	DIR* dir = opendir(data_path);
 	if (dir == NULL)
 	{
@@ -287,7 +306,7 @@ static bool extract_patch_info(const std::string& bundle_id, std::string& defaul
 	
 	char link_file[256] = {0};
 	snprintf(link_file, sizeof(link_file), "%s/libil2cpp.so", g_data_file_path);
-	std::string il2cpp_path(link_file);	
+	std::string il2cpp_path(link_file);	//il2cpp的路径
 	FILE *fp = fopen (il2cpp_path.c_str(), "r");
 	if (fp == NULL) 
 	{
@@ -297,10 +316,10 @@ static bool extract_patch_info(const std::string& bundle_id, std::string& defaul
 	fclose (fp);
 	
 	if (g_use_data_path != NULL){delete[] g_use_data_path;}
-	g_use_data_path = dupstr(data_path);
+	g_use_data_path = dupstr(data_path);	//盖掉全局的补丁路径
 	if (g_apk_file_path != NULL){delete[] g_apk_file_path;}
-	g_apk_file_path = dupstr(apk_path);
-	patch_path = il2cpp_path;
+	g_apk_file_path = dupstr(apk_path);	//盖掉全局的apk路径
+	patch_path = il2cpp_path;	//返回值
 	return true;
 }
 
@@ -523,16 +542,17 @@ static int my_stat(const char *path, struct stat *file_stat)
 	check_set_old_function_to_shadow_zip();
 	
 	memset(file_stat, 0, sizeof(struct stat));
-	int ret = old_stat(path, file_stat);
+	int ret = old_stat(path, file_stat);	//先获取原始文件的信息
 	if (ret != 0) {
 		return ret;
 	}
 	
-	if (g_apk_device_id == file_stat->st_dev && g_apk_ino == file_stat->st_ino)
+	bool isObb = IsObb(path);
+	if ((g_apk_device_id == file_stat->st_dev && g_apk_ino == file_stat->st_ino) || isObb)
 	{
-		uint64_t size = ShadowZip::get_eof_pos();
+		uint64_t size = ShadowZip::get_eof_pos(path);
 		if (size > 0){
-			file_stat->st_size = (off_t)size;
+			file_stat->st_size = (off_t)size;	//覆盖size属性
 		}
 		return ret;
 	}
@@ -580,17 +600,18 @@ static FILE *my_fopen(const char *path, const char *mode)
 		return old_fopen(path, mode);
 	}
 	
-	if (g_apk_device_id == file_stat.st_dev && g_apk_ino == file_stat.st_ino)
+	bool isobb = IsObb(path);
+	if ((g_apk_device_id == file_stat.st_dev && g_apk_ino == file_stat.st_ino) || isobb)
 	{
+		MY_LOG("shadow apk: %s", path);
 		ShadowZip* shadow_zip = new ShadowZip();
-		FILE* fp = shadow_zip->fopen();
+		FILE* fp = shadow_zip->fopen(path);
 		if (fp == NULL){	
 			MY_ERROR("something bad happens!");
 			delete shadow_zip;
 			return old_fopen(path, mode); 
 		}	
 		
-		MY_LOG("shadow apk: %s", path);
 		PthreadWriteGuard(g_global_data->g_file_to_shadowzip_mutex);
 		g_global_data->g_file_to_shadowzip[fp] = shadow_zip;
 		return fp;
@@ -704,7 +725,7 @@ typedef void *(*DlopenType)(const char *filename, int flags);
 static DlopenType old_dlopen = NULL;
 static void *my_dlopen(const char *filename, int flags)
 {
-	
+	MY_LOG("my_dlopen %s", filename);
 	check_set_old_function_to_shadow_zip();
 	
 	int il2cpp_postfix_len = strlen("libil2cpp.so");
@@ -746,19 +767,21 @@ static int my_open(const char *path, int flags, ...)
 	memset(&file_stat, 0, sizeof(struct stat));
 	if (old_stat(path, &file_stat) != 0) {
 		int ret = has_mode ? old_open(path, flags, mode) : old_open(path, flags);
-		MY_METHOD("open: %s -> fd:0x%08x", path, ret);
+		MY_METHOD("open 1: %s ->flags:0x%08x,mode:0x%08x fd:0x%08x", path, flags, mode, ret);
 		return ret;
 	}
+
+	bool isobb = IsObb(path);
 	
-	if (g_apk_device_id == file_stat.st_dev && g_apk_ino == file_stat.st_ino)
+	if ((g_apk_device_id == file_stat.st_dev && g_apk_ino == file_stat.st_ino) || isobb)
 	{
 		ShadowZip* shadow_zip = new ShadowZip();
-		FILE* fp = shadow_zip->fopen();
+		FILE* fp = shadow_zip->fopen(path);
 		if (fp == NULL){	
 			MY_ERROR("something bad happens!");
 			delete shadow_zip;
 			int ret = has_mode ? old_open(path, flags, mode) : old_open(path, flags);
-			MY_METHOD("open: %s -> fd:0x%08x", path, ret);
+			MY_METHOD("open 2: %s -> fd:0x%08x", path, ret);
 			return ret;
 		}	
 		int fd = fileno(fp);
@@ -771,7 +794,7 @@ static int my_open(const char *path, int flags, ...)
 	}
 	
 	int ret = has_mode ? old_open(path, flags, mode) : old_open(path, flags);
-	MY_METHOD("open: %s -> fd:0x%08x", path, ret);
+	MY_METHOD("open origin: %s -> fd:0x%08x", path, ret);
 	return ret;
 }
 
@@ -779,7 +802,7 @@ typedef ssize_t(*ReadType)(int fd, void *buf, size_t nbyte);
 static ReadType old_read = NULL;
 static ssize_t my_read(int fd, void *buf, size_t nbyte)
 {
-	MY_METHOD("read: 0x%08x, %zu", fd, nbyte);
+	//MY_METHOD("read: 0x%08x, %zu", fd, nbyte);
 	
 	check_set_old_function_to_shadow_zip();
 	
@@ -790,7 +813,7 @@ static ssize_t my_read(int fd, void *buf, size_t nbyte)
 	}else{
 		ret = shadow_zip->fread(buf, 1, nbyte, (FILE*)(size_t)fd);
 	}
-	MY_METHOD("readed: 0x%08x, %zd", fd, ret);
+	//MY_METHOD("readed: 0x%08x, %zd", fd, ret);
 	return ret;
 }
 
@@ -798,7 +821,7 @@ typedef off_t (*LseekType)(int fd, off_t offset, int whence);
 static LseekType old_lseek = NULL;
 off_t my_lseek(int fd, off_t offset, int whence)
 {
-	MY_METHOD("lseek: 0x%08x, offset: 0x%08lx, whence: %d", fd, offset, whence);
+	//MY_METHOD("lseek: 0x%08x, offset: 0x%08lx, whence: %d", fd, offset, whence);
 	
 	check_set_old_function_to_shadow_zip();
 	
@@ -810,7 +833,7 @@ off_t my_lseek(int fd, off_t offset, int whence)
 		ret = shadow_zip->fseek((FILE*)(size_t)fd, offset, whence);
 		if (ret == 0){ret = shadow_zip->ftell((FILE*)(size_t)fd);}
 	}
-	MY_METHOD("lseek: 0x%08x, return: %ld", fd, ret);
+	//MY_METHOD("lseek: 0x%08x, return: %ld", fd, ret);
 	return ret;
 }
 
@@ -818,7 +841,7 @@ typedef off64_t (*Lseek64Type)(int fd, off64_t offset, int whence);
 static Lseek64Type old_lseek64 = NULL;
 off64_t my_lseek64(int fd, off64_t offset, int whence)
 {
-	MY_METHOD("lseek64: 0x%08x, offset: 0x%08llx, whence: %d", fd, (unsigned long long)offset, whence);
+	//MY_METHOD("lseek64: 0x%08x, offset: 0x%08llx, whence: %d", fd, (unsigned long long)offset, whence);
 	
 	check_set_old_function_to_shadow_zip();
 	
@@ -830,7 +853,7 @@ off64_t my_lseek64(int fd, off64_t offset, int whence)
 		ret =  shadow_zip->fseek((FILE*)(size_t)fd, offset, whence);
 		if (ret == 0){ret = shadow_zip->ftell((FILE*)(size_t)fd);}
 	}
-	MY_METHOD("lseek64: 0x%08x, return: %lld", fd, (unsigned long long)ret);
+	//MY_METHOD("lseek64: 0x%08x, return: %lld", fd, (unsigned long long)ret);
 	return ret;
 }
 
@@ -863,6 +886,26 @@ static int my_close(int fd)
 		return shadow_zip->fclose((FILE*)(size_t)fd);
 	}
 }
+
+typedef int(*MkdirType)(const char *path, mode_t mode, ...);
+static MkdirType old_mkdir = NULL;
+int my_mkdir(const char *path, mode_t mode){
+	MY_LOG("my_mkdir %s mode:%X", path, mode);
+	return old_mkdir(path, mode);
+}
+typedef int(*RmdirType)(const char *path, ...);
+static RmdirType old_rmdir = NULL;
+int my_rmdir(const char *path) {
+	MY_LOG("my_rmdir %s", path);
+	return old_rmdir(path);
+}
+typedef int(*OpendirType)(const char *path, ...);
+static OpendirType old_opendir = NULL;
+int my_opendir(const char *path) {
+	MY_LOG("my_opendir %s", path);
+	return old_opendir(path);
+}
+
 
 static int init_hook(const std::string& bundle_id)
 {
@@ -952,6 +995,9 @@ static int init_hook(const std::string& bundle_id)
 	HOOK("libunity.so", lseek);
 	HOOK("libunity.so", lseek64);
 	HOOK("libunity.so", close);
+	//HOOK("libunity.so", mkdir);
+	//HOOK("libunity.so", rmdir);
+	//HOOK("libunity.so", opendir);
 	
 	if(0 != xhook_refresh(1)){
 		MY_ERROR("failed to find replace function"); 
@@ -1022,23 +1068,25 @@ static void check_set_old_function_to_shadow_zip()
 
 static void bootstrap()
 {
+	//use_data_dir("/storage/emulated/0/Android/data/com.hongbaoshi.sqbb/files/pathdownload", ""); //测试代码
+
 	std::string bundle_id = get_bundle_id();
-	if (!verify_bundle_id( bundle_id.c_str() )){		
-		MY_ERROR("bundle id not matched:" BUNDLE_ID);
-		return;
-	}
+	//if (!verify_bundle_id( bundle_id.c_str() )){		
+	//	MY_ERROR("bundle id not matched:" BUNDLE_ID);
+	//	return;
+	//}
 	
 	std::string default_il2cpp_path;
 	std::string patch_il2cpp_path;
 	bool use_patch = extract_patch_info(bundle_id, default_il2cpp_path, patch_il2cpp_path);
-	if (!verify_bundle_id( bundle_id.c_str() )){		
-		MY_ERROR("bootstrap running failed.");
-		return;
-	}
+	//if (!verify_bundle_id( bundle_id.c_str() )){		
+	//	MY_ERROR("bootstrap running failed.");
+	//	return;
+	//}
 	
 	if (use_patch){
 		MY_INFO("bootstrap running %s with apk_path:%s", TARGET_ARCH_ABI, g_apk_file_path);	
-		bool success = (0 == ShadowZip::init(g_use_data_path, g_apk_file_path)) && (0 == init_hook(bundle_id)) && (0 == init_art_hook());
+		bool success = (0 == ShadowZip::init(g_use_data_path, g_apk_file_path, g_obb_file_path)) && (0 == init_hook(bundle_id)) && (0 == init_art_hook());
 		if (success)
 		{			
 			static void *handle = dlopen(patch_il2cpp_path.c_str(), RTLD_NOW);
@@ -1051,7 +1099,7 @@ static void bootstrap()
 			check_set_old_function_to_shadow_zip();
 			
 			MY_INFO("bootstrap running with patch:%s", patch_il2cpp_path.c_str());
-			//ShadowZip::output_apk(g_use_data_path);
+			//ShadowZip::output_apk(g_apk_file_path, g_use_data_path);
 		}// else we still do so hook
 		else
 		{		

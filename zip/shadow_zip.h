@@ -23,6 +23,23 @@ struct FilePartitionInfo
     uint64_t stop_in_file_;
 };
 
+namespace android {
+	class ZipEntry;
+}
+class VirtualZipFile {
+public:
+	int real_file_index;
+	uint64_t end_of_file_;
+	std::vector<android::ZipEntry*> all_entries;
+	std::vector<FilePartitionInfo> patch_partitions;
+	void WriteHeader(char* path, int header_data_index);
+	void AddEntries(std::vector<android::ZipEntry*>* entries, std::map<std::string, android::ZipEntry*>* filename_2_entry);
+
+	int pre_file_index = -1;
+	uint64_t pre_file_stop = 0;
+	uint64_t pre_shadow_stop = 0;
+};
+
 class ShadowZip
 {
 public:
@@ -33,7 +50,7 @@ public:
         fclose(NULL);
     }
 
-    FILE* fopen();
+    FILE* fopen(const char* path);
     off64_t fseek(FILE *stream, off64_t offset, int whence);
     long ftell(FILE *stream);
     void rewind(FILE *stream);
@@ -41,9 +58,9 @@ public:
 	char* fgets(char *s, int size, FILE *stream);
     int fclose(FILE* _fp);
 
-    static int init(const char* _patch_dir, const char* _sys_apk_file);
-	static uint64_t get_eof_pos();
-	static void output_apk(const char* _patch_dir);
+    static int init(const char* _patch_dir, const char* _sys_apk_file, const char* _obb_file_path);
+	static uint64_t get_eof_pos(const char* path);
+	void output_apk(const char* _apk_path, const char* _patch_dir);
     static FILE *(*volatile old_fopen)(const char *path, const char *mode);
     static int (*volatile old_fseek)(FILE *stream, long offset, int whence);
     static long (*volatile old_ftell)(FILE *stream);
@@ -55,6 +72,7 @@ public:
 	static bool contains_path(const char* _apk_file, const char* _check_path);
 private:
     FILE* prepare_file(int _file_index);
+	VirtualZipFile* virtualFile;
 
 private:
     int64_t pos_;
